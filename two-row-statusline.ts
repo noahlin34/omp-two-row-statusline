@@ -14,12 +14,24 @@ const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
 const borderlessEditors = new WeakSet<object>();
+const STATUSLINE_ROWS = 2;
+
+/**
+ * The host sizes the built-in bordered editor, whose max-height includes two
+ * rows of border chrome. This editor moves that chrome into the two-row
+ * status widget, so keep the combined widget/editor footprint unchanged.
+ */
+class TwoRowStatuslineEditor extends CustomEditor {
+	override setMaxHeight(maxHeight: number | undefined): void {
+		super.setMaxHeight(maxHeight === undefined ? undefined : Math.max(1, maxHeight - STATUSLINE_ROWS));
+	}
+}
 
 function installBorderlessEditor(ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui" || borderlessEditors.has(ctx)) return;
 	borderlessEditors.add(ctx);
 	ctx.ui.setEditorComponent((_tui, theme, keybindings) => {
-		const editor = new CustomEditor(_tui, theme, keybindings);
+		const editor = new TwoRowStatuslineEditor(_tui, theme, keybindings);
 		editor.setBorderVisible(false);
 		return editor;
 	});
