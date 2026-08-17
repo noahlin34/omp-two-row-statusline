@@ -3,35 +3,51 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import type { Component } from "@oh-my-pi/pi-tui";
 import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
 
 const WIDGET_KEY = "omp-two-row-statusline";
+const STATUS_REFRESH_KEY = `${WIDGET_KEY}:refresh`;
 const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
-const borderlessEditors = new WeakSet<object>();
 const STATUSLINE_ROWS = 2;
+const borderlessEditors = new WeakSet<object>();
+
+type StatuslineRows = (width: number) => readonly string[];
 
 /**
- * The host sizes the built-in bordered editor, whose max-height includes two
- * rows of border chrome. This editor moves that chrome into the two-row
- * status widget, so keep the combined widget/editor footprint unchanged.
+ * OMP sizes the built-in bordered editor, whose max-height includes two rows
+ * of border chrome. Render the two statusline rows inside this same component
+ * and reserve those rows from the borderless editor's content.
  */
 class TwoRowStatuslineEditor extends CustomEditor {
+	#renderStatusline: StatuslineRows;
+
+	constructor(tui: unknown, theme: unknown, keybindings: unknown, renderStatusline: StatuslineRows) {
+		super(tui, theme, keybindings);
+		this.#renderStatusline = renderStatusline;
+	}
+
 	override setMaxHeight(maxHeight: number | undefined): void {
 		super.setMaxHeight(maxHeight === undefined ? undefined : Math.max(1, maxHeight - STATUSLINE_ROWS));
 	}
+
+	override render(width: number): readonly string[] {
+		return [...this.#renderStatusline(width), ...super.render(width)];
+	}
 }
 
-function installBorderlessEditor(ctx: ExtensionContext): void {
+function installBorderlessEditor(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui" || borderlessEditors.has(ctx)) return;
 	borderlessEditors.add(ctx);
 	ctx.ui.setEditorComponent((_tui, theme, keybindings) => {
-		const editor = new TwoRowStatuslineEditor(_tui, theme, keybindings);
+		const editor = new TwoRowStatuslineEditor(_tui, theme, keybindings, width => {
+			const statusTheme = ctx.ui.theme;
+			return [renderTopRow(ctx, statusTheme, width), renderBottomRow(pi, ctx, statusTheme, width)];
+		});
 		editor.setBorderVisible(false);
 		return editor;
 	});
@@ -191,7 +207,13 @@ function renderSubscriptionUsage(ctx: ExtensionContext, theme: StatusTheme): str
 	);
 }
 
-function refreshSubscriptionUsage(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function requestStatuslineRender(ctx: ExtensionContext): void {
+	// Clearing a private hook key is row-free but still asks the TUI to repaint
+	// the editor, whose render owns both statusline rows.
+	ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
+}
+
+function refreshSubscriptionUsage(ctx: ExtensionContext): void {
 	const state = getUsageState(ctx);
 	const provider = ctx.model?.provider ?? "";
 	const sessionId = ctx.sessionManager.getSessionId();
@@ -223,7 +245,7 @@ function refreshSubscriptionUsage(pi: ExtensionAPI, ctx: ExtensionContext): void
 		.then(reports => {
 			state.usage = selectSubscriptionUsage(reports, ctx);
 			state.fetchedAt = Date.now();
-			installWidget(pi, ctx);
+			requestStatuslineRender(ctx);
 		})
 		.catch(() => {
 			state.fetchedAt = Date.now();
@@ -233,13 +255,13 @@ function refreshSubscriptionUsage(pi: ExtensionAPI, ctx: ExtensionContext): void
 		});
 }
 
-function scheduleSubscriptionUsageRefresh(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
 	if (usageRefreshTimers.has(ctx)) return;
 	usageRefreshTimers.add(ctx);
 	ctx.setInterval(() => {
 		const state = getUsageState(ctx);
-		if (state.usage) installWidget(pi, ctx);
-		refreshSubscriptionUsage(pi, ctx);
+		if (state.usage) requestStatuslineRender(ctx);
+		refreshSubscriptionUsage(ctx);
 	}, 60_000);
 }
 
@@ -320,26 +342,11 @@ function renderBottomRow(pi: ExtensionAPI, ctx: ExtensionContext, theme: StatusT
 	return renderBlackRow(left, right, width);
 }
 
-function installWidget(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	if (!ctx.hasUI || ctx.mode !== "tui") return;
-
-	ctx.ui.setWidget(
-		WIDGET_KEY,
-		(_tui, theme): Component => ({
-			render(width: number): readonly string[] {
-				return [renderTopRow(ctx, theme, width), renderBottomRow(pi, ctx, theme, width)];
-			},
-		}),
-		{ placement: "aboveEditor" },
-	);
-}
-
 export default function twoRowStatusline(pi: ExtensionAPI): void {
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
-		installBorderlessEditor(ctx);
-		installWidget(pi, ctx);
-		scheduleSubscriptionUsageRefresh(pi, ctx);
-		refreshSubscriptionUsage(pi, ctx);
+		installBorderlessEditor(pi, ctx);
+		scheduleSubscriptionUsageRefresh(ctx);
+		refreshSubscriptionUsage(ctx);
 	};
 
 	pi.on("session_start", refresh);
@@ -353,6 +360,7 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (ctx.hasUI) {
+			ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
 			ctx.ui.setWidget(WIDGET_KEY, undefined);
 			ctx.ui.setEditorComponent(undefined);
 		}
