@@ -93,6 +93,7 @@ function matchesUsageAccount(
 	}
 
 	const matches = [
+
 		[identity.accountId, metadata.accountId ?? metadata.account_id ?? scope.accountId],
 		[identity.email, metadata.email],
 		[identity.projectId, metadata.projectId ?? scope.projectId],
