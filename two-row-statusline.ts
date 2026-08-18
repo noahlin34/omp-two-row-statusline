@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import { setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
@@ -24,10 +25,18 @@ type StatuslineRows = (width: number) => readonly string[];
  */
 class TwoRowStatuslineEditor extends CustomEditor {
 	#renderStatusline: StatuslineRows;
+	#syncTheme: () => void;
 
-	constructor(tui: unknown, theme: unknown, keybindings: unknown, renderStatusline: StatuslineRows) {
+	constructor(
+		tui: unknown,
+		theme: unknown,
+		keybindings: unknown,
+		renderStatusline: StatuslineRows,
+		syncTheme: () => void,
+	) {
 		super(tui, theme, keybindings);
 		this.#renderStatusline = renderStatusline;
+		this.#syncTheme = syncTheme;
 	}
 
 	override setMaxHeight(maxHeight: number | undefined): void {
@@ -35,6 +44,7 @@ class TwoRowStatuslineEditor extends CustomEditor {
 	}
 
 	override render(width: number): readonly string[] {
+		this.#syncTheme();
 		return [...this.#renderStatusline(width), ...super.render(width)];
 	}
 }
@@ -42,11 +52,25 @@ class TwoRowStatuslineEditor extends CustomEditor {
 function installBorderlessEditor(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui" || borderlessEditors.has(ctx)) return;
 	borderlessEditors.add(ctx);
+
+	/**
+	 * Extensions load source modules alongside OMP's bundled CLI. That gives
+	 * CustomEditor's magic-keyword highlighter a separate theme singleton, so
+	 * point it at the live host theme before the inherited editor render runs.
+	 */
+	let syncedTheme: StatusTheme | undefined;
+	const syncTheme = (): void => {
+		const currentTheme = ctx.ui.theme;
+		if (currentTheme === syncedTheme) return;
+		setThemeInstance(currentTheme);
+		syncedTheme = currentTheme;
+	};
+
 	ctx.ui.setEditorComponent((_tui, theme, keybindings) => {
 		const editor = new TwoRowStatuslineEditor(_tui, theme, keybindings, width => {
 			const statusTheme = ctx.ui.theme;
 			return [renderTopRow(ctx, statusTheme, width), renderBottomRow(pi, ctx, statusTheme, width)];
-		});
+		}, syncTheme);
 		editor.setBorderVisible(false);
 		return editor;
 	});
