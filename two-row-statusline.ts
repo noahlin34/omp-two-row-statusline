@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
@@ -66,7 +65,7 @@ function formatTokens(value: number): string {
 type SubscriptionUsage = {
 	window: string;
 	resetsAt?: number;
-	usedPercent: number;
+	remainingPercent: number;
 };
 
 type UsageLimitLike = {
@@ -133,6 +132,30 @@ function matchesUsageAccount(
 	return matches || Boolean(activeOrg && !identity.accountId && !identity.email && !identity.projectId);
 }
 
+function resolveUsageUsedFraction(limit: UsageLimitLike): number | undefined {
+	const amount = limit.amount;
+	if (!amount) return undefined;
+	const usedFraction = amount.usedFraction;
+	if (typeof usedFraction === "number" && Number.isFinite(usedFraction)) return usedFraction;
+	const used = amount.used;
+	const limitValue = amount.limit;
+	if (
+		typeof used === "number" &&
+		Number.isFinite(used) &&
+		typeof limitValue === "number" &&
+		Number.isFinite(limitValue) &&
+		limitValue > 0
+	) {
+		return used / limitValue;
+	}
+	if (amount.unit === "percent" && typeof used === "number" && Number.isFinite(used)) return used / 100;
+	const remainingFraction = amount.remainingFraction;
+	if (typeof remainingFraction === "number" && Number.isFinite(remainingFraction)) {
+		return Math.max(0, 1 - remainingFraction);
+	}
+	return undefined;
+}
+
 function usageWindowLabel(windowId: unknown, durationMs: unknown): string {
 	if (windowId === "daily" || windowId === "1d") return "1d";
 	if (windowId === "monthly" || windowId === "30d") return "30d";
@@ -169,7 +192,7 @@ function selectSubscriptionUsage(reports: unknown, ctx: ExtensionContext): Subsc
 			if (!value || typeof value !== "object") continue;
 			const limit = value as UsageLimitLike;
 			if (!matchesUsageAccount(report, limit, identity)) continue;
-			const fraction = limit.amount?.usedFraction;
+			const fraction = resolveUsageUsedFraction(limit);
 			if (typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
 			const window = usageWindowLabel(limit.scope?.windowId, limit.window?.durationMs);
 			const resetsAt = limit.window?.resetsAt;
@@ -178,7 +201,7 @@ function selectSubscriptionUsage(reports: unknown, ctx: ExtensionContext): Subsc
 				usage: {
 					window,
 					resetsAt: typeof resetsAt === "number" && Number.isFinite(resetsAt) ? resetsAt : undefined,
-					usedPercent: Math.max(0, Math.min(100, fraction * 100)),
+					remainingPercent: Math.max(0, Math.min(100, (1 - fraction) * 100)),
 				},
 			});
 		}
@@ -203,7 +226,7 @@ function renderSubscriptionUsage(ctx: ExtensionContext, theme: StatusTheme): str
 	if (!usage) return "";
 	return theme.fg(
 		"statusLineOutput",
-		`${formatResetCountdown(usage.resetsAt)} ${Math.round(usage.usedPercent)}%`,
+		`${formatResetCountdown(usage.resetsAt)} ${Math.round(usage.remainingPercent)}%`,
 	);
 }
 
@@ -277,16 +300,16 @@ function renderBlackRow(left: string, right: string, width: number): string {
 	return `${BLACK_BG}${" ".repeat(edgePadding)}${content}${" ".repeat(trailingPadding + edgePadding)}${RESET}`;
 }
 
-function projectLabel(ctx: ExtensionContext, theme: StatusTheme): string {
-	const cwd = ctx.cwd || ctx.sessionManager.getCwd();
-	const project = cleanText(basename(cwd || "project")) || "project";
+function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
+	const title = cleanText(ctx.sessionManager.getSessionName() ?? "");
+	if (!title) return "";
 	const accentHex = getSessionAccentHex(
-		project,
+		title,
 		theme.getMajorThemeColorHexes(),
 		theme.accentSurfaceLuminance,
 	);
 	const accentAnsi = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("accent");
-	return `${accentAnsi}${accentHex}${FG_RESET} ${theme.fg("text", project)}`;
+	return `${accentAnsi}${accentHex}${FG_RESET} ${theme.fg("text", title)}`;
 }
 
 function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number): string {
@@ -295,7 +318,7 @@ function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number):
 	const jobs = running.filter(job => job.type === "bash").length;
 	const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
 	const right = theme.fg("statusLineSubagents", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`);
-	return renderBlackRow(projectLabel(ctx, theme), right, width);
+	return renderBlackRow(sessionTitleLabel(ctx, theme), right, width);
 }
 
 function renderModel(pi: ExtensionAPI, theme: StatusTheme, ctx: ExtensionContext): string {

@@ -10,7 +10,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 
 ### Top row
 
-- The current project directory, with the session accent color.
+- The current session title, with the session accent color.
 - Counts of running task and bash jobs.
 
 ### Bottom row
