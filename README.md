@@ -21,7 +21,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 - Subscription usage and reset countdown when the provider exposes usage data.
 - Current output throughput in tokens per second.
 
-The extension also removes the editor border in TUI mode. It does nothing in non-TUI or headless sessions.
+The top editor border is replaced by the two statusline rows; the bottom border remains as the editor's trailing edge.
 
 ## Install
 
