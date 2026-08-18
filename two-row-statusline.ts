@@ -7,22 +7,19 @@ import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
 
-const WIDGET_KEY = "omp-two-row-statusline";
-const STATUS_REFRESH_KEY = `${WIDGET_KEY}:refresh`;
+const STATUS_REFRESH_KEY = "omp-two-row-statusline:refresh";
 const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
 const EDITOR_EDGE_PADDING = 1;
-const STATUSLINE_ROWS = 2;
 const borderlessEditors = new WeakSet<object>();
 
 type StatuslineRows = (width: number) => readonly string[];
 
 /**
- * OMP sizes the built-in bordered editor, whose max-height includes two rows
- * of border chrome. Render the two statusline rows inside this same component
- * and reserve those rows from the borderless editor's content.
+ * OMP sizes the built-in editor for its content area. Reserve the two
+ * statusline rows while rendering the editor without border chrome.
  */
 class TwoRowStatuslineEditor extends CustomEditor {
 	#renderStatusline: StatuslineRows;
@@ -41,7 +38,7 @@ class TwoRowStatuslineEditor extends CustomEditor {
 	}
 
 	override setMaxHeight(maxHeight: number | undefined): void {
-		super.setMaxHeight(maxHeight === undefined ? undefined : Math.max(1, maxHeight - STATUSLINE_ROWS));
+		super.setMaxHeight(maxHeight === undefined ? undefined : Math.max(1, maxHeight - 2));
 	}
 
 	override render(width: number): readonly string[] {
@@ -59,7 +56,7 @@ class TwoRowStatuslineEditor extends CustomEditor {
 	}
 }
 
-function installBorderlessEditor(pi: ExtensionAPI, ctx: ExtensionContext): void {
+function installStatuslineEditor(pi: ExtensionAPI, ctx: ExtensionContext): void {
 	if (!ctx.hasUI || ctx.mode !== "tui" || borderlessEditors.has(ctx)) return;
 	borderlessEditors.add(ctx);
 
@@ -401,7 +398,7 @@ function renderBottomRow(pi: ExtensionAPI, ctx: ExtensionContext, theme: StatusT
 
 export default function twoRowStatusline(pi: ExtensionAPI): void {
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
-		installBorderlessEditor(pi, ctx);
+		installStatuslineEditor(pi, ctx);
 		scheduleSubscriptionUsageRefresh(ctx);
 		refreshSubscriptionUsage(ctx);
 	};
@@ -418,7 +415,6 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (ctx.hasUI) {
 			ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
-			ctx.ui.setWidget(WIDGET_KEY, undefined);
 			ctx.ui.setEditorComponent(undefined);
 		}
 	});
