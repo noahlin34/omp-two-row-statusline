@@ -13,6 +13,7 @@ const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
+const EDITOR_EDGE_PADDING = 1;
 const STATUSLINE_ROWS = 2;
 const borderlessEditors = new WeakSet<object>();
 
@@ -45,7 +46,16 @@ class TwoRowStatuslineEditor extends CustomEditor {
 
 	override render(width: number): readonly string[] {
 		this.#syncTheme();
-		return [...this.#renderStatusline(width), ...super.render(width)];
+		const edgePadding = width >= EDITOR_EDGE_PADDING * 2 + 1 ? EDITOR_EDGE_PADDING : 0;
+		const editorWidth = Math.max(1, width - edgePadding * 2);
+		const editorRows = super.render(editorWidth);
+		if (edgePadding === 0) return [...this.#renderStatusline(width), ...editorRows];
+
+		const padding = " ".repeat(edgePadding);
+		return [
+			...this.#renderStatusline(width),
+			...editorRows.map(line => `${padding}${line}${" ".repeat(Math.max(0, editorWidth - visibleWidth(line)))}${padding}`),
+		];
 	}
 }
 
