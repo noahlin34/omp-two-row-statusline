@@ -1,9 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { truncateToWidth, visibleWidth, type ComposerStyle } from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
 
@@ -12,74 +10,35 @@ const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
-const EDITOR_EDGE_PADDING = 1;
-const borderlessEditors = new WeakSet<object>();
 
-type StatuslineRows = (width: number) => readonly string[];
+function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => ExtensionContext | undefined): void {
 
-/**
- * OMP sizes the built-in editor for its content area. Reserve the two
- * statusline rows while rendering the editor without border chrome.
- */
-class TwoRowStatuslineEditor extends CustomEditor {
-	#renderStatusline: StatuslineRows;
-	#syncTheme: () => void;
-
-	constructor(
-		tui: unknown,
-		theme: unknown,
-		keybindings: unknown,
-		renderStatusline: StatuslineRows,
-		syncTheme: () => void,
-	) {
-		super(tui, theme, keybindings);
-		this.#renderStatusline = renderStatusline;
-		this.#syncTheme = syncTheme;
-	}
-
-	override setMaxHeight(maxHeight: number | undefined): void {
-		super.setMaxHeight(maxHeight === undefined ? undefined : Math.max(1, maxHeight - 2));
-	}
-
-	override render(width: number): readonly string[] {
-		this.#syncTheme();
-		const edgePadding = width >= EDITOR_EDGE_PADDING * 2 + 1 ? EDITOR_EDGE_PADDING : 0;
-		const editorWidth = Math.max(1, width - edgePadding * 2);
-		const editorRows = super.render(editorWidth);
-		if (edgePadding === 0) return [...this.#renderStatusline(width), ...editorRows];
-
-		const padding = " ".repeat(edgePadding);
-		return [
-			...this.#renderStatusline(width),
-			...editorRows.map(line => `${padding}${line}${" ".repeat(Math.max(0, editorWidth - visibleWidth(line)))}${padding}`),
-		];
-	}
-}
-
-function installStatuslineEditor(pi: ExtensionAPI, ctx: ExtensionContext): void {
-	if (!ctx.hasUI || ctx.mode !== "tui" || borderlessEditors.has(ctx)) return;
-	borderlessEditors.add(ctx);
-
-	/**
-	 * Extensions load source modules alongside OMP's bundled CLI. That gives
-	 * CustomEditor's magic-keyword highlighter a separate theme singleton, so
-	 * point it at the live host theme before the inherited editor render runs.
-	 */
-	let syncedTheme: StatusTheme | undefined;
-	const syncTheme = (): void => {
-		const currentTheme = ctx.ui.theme;
-		if (currentTheme === syncedTheme) return;
-		setThemeInstance(currentTheme);
-		syncedTheme = currentTheme;
+	const style: ComposerStyle = {
+		id: "omp-two-row-statusline",
+		sideBorders: false,
+		verticalChrome: 2,
+		statusAttachment: "none",
+		bottomBar: "none",
+		bottomBarGap: false,
+		defaultPromptGutter: "❯ ",
+		defaultPaddingX: () => 0,
+		sideChromeWidth: () => 0,
+		renderTop: ({ width }) => {
+			const ctx = getContext();
+			if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
+			return renderTopRow(ctx, ctx.ui.theme, width);
+		},
+		renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
+		renderBottom: ({ width }) => {
+			const ctx = getContext();
+			if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
+			return renderBottomRow(pi, ctx, ctx.ui.theme, width);
+		},
 	};
-
-	ctx.ui.setEditorComponent((_tui, theme, keybindings) => {
-		const editor = new TwoRowStatuslineEditor(_tui, theme, keybindings, width => {
-			const statusTheme = ctx.ui.theme;
-			return [renderTopRow(ctx, statusTheme, width), renderBottomRow(pi, ctx, statusTheme, width)];
-		}, syncTheme);
-		editor.setBorderVisible(false);
-		return editor;
+	pi.registerComposerShape({
+		label: "OMP Two-Row Statusline",
+		description: "Two status rows around a borderless composer",
+		style,
 	});
 }
 
@@ -348,7 +307,7 @@ function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number):
 	const tasks = running.filter(job => job.type === "task").length;
 	const jobs = running.filter(job => job.type === "bash").length;
 	const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
-	const right = theme.fg("statusLineSubagents", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`);
+	const right = theme.fg("success", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`);
 	return renderBlackRow(sessionTitleLabel(ctx, theme), right, width);
 }
 
@@ -357,7 +316,12 @@ function renderModel(pi: ExtensionAPI, theme: StatusTheme, ctx: ExtensionContext
 	const level = pi.getThinkingLevel();
 	let thinking = "";
 	if (level) {
-		const display = level === "off" ? `${theme.status.disabled} off` : (theme.thinking[level] ?? level);
+		const display =
+			level === "off"
+				? `${theme.status.disabled} off`
+				: level === "inherit"
+					? level
+					: (theme.thinking[level] ?? level);
 		thinking = ` ${theme.sep.dot}${display}`;
 	}
 	return theme.fg("statusLineModel", `${theme.icon.model} ${model}${thinking}`);
@@ -397,8 +361,11 @@ function renderBottomRow(pi: ExtensionAPI, ctx: ExtensionContext, theme: StatusT
 }
 
 export default function twoRowStatusline(pi: ExtensionAPI): void {
+	let activeContext: ExtensionContext | undefined;
+	registerStatuslineComposer(pi, () => activeContext);
+
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
-		installStatuslineEditor(pi, ctx);
+		activeContext = ctx;
 		scheduleSubscriptionUsageRefresh(ctx);
 		refreshSubscriptionUsage(ctx);
 	};
@@ -413,9 +380,9 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", refresh);
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		if (activeContext === ctx) activeContext = undefined;
 		if (ctx.hasUI) {
 			ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
-			ctx.ui.setEditorComponent(undefined);
 		}
 	});
 }

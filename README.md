@@ -1,6 +1,6 @@
 # OMP Two-Row Statusline
 
-A small [Oh My Pi](https://github.com/can1357/oh-my-pi) extension that replaces the default TUI footer with a two-row statusline above the editor.
+A small [Oh My Pi](https://github.com/can1357/oh-my-pi) extension that registers a native Composer Shape for a two-row statusline above and below the composer.
 
 It is a single TypeScript extension module. OMP loads it directly; no build step is required.
 
@@ -11,7 +11,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 ### Top row
 
 - The current session title, with the session accent color.
-- Counts of running task and bash jobs.
+- Green counts of running task and bash jobs, aligned to the right edge.
 
 ### Bottom row
 
@@ -21,7 +21,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 - Subscription usage and reset countdown when the provider exposes usage data.
 - Current output throughput in tokens per second.
 
-The top editor border is replaced by the two statusline rows; the bottom border remains as the editor's trailing edge.
+The extension registers OMP's native Composer Shape API: the top row is composer chrome above the input, and the bottom row is composer chrome below it. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
 
 ## Install
 
@@ -71,9 +71,11 @@ omp -e ./two-row-statusline.ts
 
 For an auto-discovered extension, restart OMP or use `/reload` after changing the file.
 
+After loading it, select **OMP Two-Row Statusline** in **Settings → Appearance → Composer Shape**. Composer shapes are registered by extensions but are not selected automatically; OMP otherwise keeps the configured shape (usually `box`).
+
 ## How it works
 
-The extension registers the widget during session, agent, and tool lifecycle events. The widget is placed `aboveEditor` and renders two full-width rows using the current theme.
+The extension registers the composer shape during extension initialization, then updates the active session context from lifecycle events. OMP owns the editor lifecycle and renders the two full-width rows through the native Composer Style hooks.
 
 Subscription usage is optional:
 
@@ -83,7 +85,7 @@ Subscription usage is optional:
 - Results are cached for five minutes and refreshed in the background approximately once per minute.
 - A report request has a two-second timeout; unavailable usage data is omitted from the statusline.
 
-The widget is removed and the custom editor is restored on `session_shutdown`.
+The composer shape remains registered for the extension lifetime; its render callbacks stop emitting status rows when the session shuts down.
 
 ## Requirements
 
@@ -109,7 +111,7 @@ README.md              # This file
 
 ## Troubleshooting
 
-- **Nothing appears:** confirm the file is under `~/.omp/agent/extensions`, `.omp/extensions`, or an `extensions` setting, then restart OMP or run `/reload`.
+- **Nothing appears:** confirm the file is under `~/.omp/agent/extensions`, `.omp/extensions`, or an `extensions` setting, restart OMP or run `/reload`, then select **OMP Two-Row Statusline** under **Settings → Appearance → Composer Shape**.
 - **Only one row appears or content is clipped:** widen the terminal; both rows are width-aware and truncate their content to fit.
 - **Subscription usage is missing:** the provider may not expose usage reports, the account may not match a report, or the request may have timed out. The rest of the statusline remains available.
-- **The editor border is still visible:** the extension only changes the editor in TUI mode and only while the extension is loaded.
+- **The editor border is still visible:** the custom shape is not active; select **OMP Two-Row Statusline** under **Settings → Appearance → Composer Shape**. The extension does not replace OMP's configured composer automatically.
