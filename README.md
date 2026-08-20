@@ -1,6 +1,6 @@
 # OMP Two-Row Statusline
 
-A small [Oh My Pi](https://github.com/can1357/oh-my-pi) extension that registers a native Composer Shape for a two-row statusline above and below the composer.
+A small [Oh My Pi](https://github.com/can1357/oh-my-pi) extension that registers a native Composer Shape for a unified two-row statusline above the composer.
 
 It is a single TypeScript extension module. OMP loads it directly; no build step is required.
 
@@ -21,7 +21,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 - Subscription usage and reset countdown when the provider exposes usage data.
 - Current output throughput in tokens per second.
 
-The extension registers OMP's native Composer Shape API: the top row is composer chrome above the input, and the bottom row is composer chrome below it. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
+The extension registers OMP's native Composer Shape API: both status rows render above the input, keeping the prompt and caret below the unified statusline. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
 
 ## Install
 
@@ -75,7 +75,7 @@ After loading it, select **OMP Two-Row Statusline** in **Settings → Appearance
 
 ## How it works
 
-The extension registers the composer shape during extension initialization, then updates the active session context from lifecycle events. OMP owns the editor lifecycle and renders the two full-width rows through the native Composer Style hooks.
+The extension registers the composer shape during extension initialization, then updates the active session context from lifecycle events. OMP owns the editor lifecycle and renders both full-width status rows above the input through the native Composer Style hooks.
 
 Subscription usage is optional:
 
