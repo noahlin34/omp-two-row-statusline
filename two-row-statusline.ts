@@ -12,6 +12,7 @@ const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
 
 function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => ExtensionContext | undefined): void {
+	let contentRowIndex = 0;
 
 	const style: ComposerStyle = {
 		id: "omp-two-row-statusline",
@@ -24,20 +25,27 @@ function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => Extensio
 		defaultPaddingX: () => 0,
 		sideChromeWidth: () => 0,
 		renderTop: ({ width }) => {
+			contentRowIndex = 0;
 			const ctx = getContext();
 			if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
 			return renderTopRow(ctx, ctx.ui.theme, width);
 		},
-		renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
-		renderBottom: ({ width }) => {
+		renderRow: ({ width, gutter, text, pad }) => {
+			const row = gutter + text + pad;
+			if (contentRowIndex++ !== 0) return [row];
+
+			// The second status row must be above the editor. A ComposerStyle's
+			// renderBottom callback runs after the cursor row, so emit this row
+			// alongside the first content row instead.
 			const ctx = getContext();
-			if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
-			return renderBottomRow(pi, ctx, ctx.ui.theme, width);
+			if (!ctx?.hasUI || ctx.mode !== "tui") return [row];
+			return [renderBottomRow(pi, ctx, ctx.ui.theme, width), row];
 		},
+		renderBottom: () => undefined,
 	};
 	pi.registerComposerShape({
 		label: "OMP Two-Row Statusline",
-		description: "Two status rows around a borderless composer",
+		description: "Two status rows above a borderless composer",
 		style,
 	});
 }
