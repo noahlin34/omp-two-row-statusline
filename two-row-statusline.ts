@@ -301,11 +301,7 @@ function renderBlackRow(left: string, right: string, width: number): string {
 function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
 	const title = cleanText(ctx.sessionManager.getSessionName() ?? "");
 	if (!title) return "";
-	const accentHex = getSessionAccentHex(
-		title,
-		theme.getMajorThemeColorHexes(),
-		theme.accentSurfaceLuminance,
-	);
+	const accentHex = getSessionAccentHex(title, theme.sessionAccentInputs);
 	const accentAnsi = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("accent");
 	return `${accentAnsi}${accentHex}${FG_RESET} ${theme.fg("text", title)}`;
 }
