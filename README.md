@@ -11,15 +11,15 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 ### Top row
 
 - The current session title, with the session accent color.
-- Green counts of running task and bash jobs, aligned to the right edge.
+- Right-aligned: green counts of running task and bash jobs, and the current output throughput in tokens per second.
 
 ### Bottom row
 
 - The active model and thinking level.
 - The current working directory, shortened when it is too long.
 - Context usage as a percentage and formatted token count.
+- Elapsed agent-processing time (the same active-time counter as OMP's built-in `time_spent` segment: idle time between turns never accumulates).
 - Subscription usage and reset countdown when the provider exposes usage data.
-- Current output throughput in tokens per second.
 
 The extension registers OMP's native Composer Shape API: both status rows render above the input, keeping the prompt and caret below the unified statusline. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
 
@@ -98,6 +98,7 @@ The source imports OMP's bundled extension and TUI APIs:
 ```ts
 @oh-my-pi/pi-coding-agent
 @oh-my-pi/pi-tui
+@oh-my-pi/pi-utils
 ```
 
 It is intended to run inside OMP, not as a standalone Node.js script.
