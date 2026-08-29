@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import { formatDuration } from "@oh-my-pi/pi-utils";
 import { truncateToWidth, visibleWidth, type ComposerStyle } from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
@@ -89,6 +90,43 @@ type UsageState = {
 const usageStates = new WeakMap<object, UsageState>();
 const usageRefreshTimers = new WeakSet<object>();
 const USAGE_CACHE_MS = 5 * 60_000;
+
+const activeMeters = new WeakMap<object, ActiveMeter>();
+const meterTickTimers = new WeakSet<object>();
+
+type ActiveMeter = {
+	activeMs: number;
+	activeStartedAt: number | null;
+};
+
+function getActiveMeter(ctx: ExtensionContext): ActiveMeter {
+	let meter = activeMeters.get(ctx.sessionManager);
+	if (!meter) {
+		meter = { activeMs: 0, activeStartedAt: null };
+		activeMeters.set(ctx.sessionManager, meter);
+	}
+	return meter;
+}
+
+function markActivityStart(ctx: ExtensionContext): void {
+	const meter = getActiveMeter(ctx);
+	if (meter.activeStartedAt !== null) return;
+	meter.activeStartedAt = Date.now();
+}
+
+function markActivityEnd(ctx: ExtensionContext): void {
+	const meter = getActiveMeter(ctx);
+	if (meter.activeStartedAt === null) return;
+	meter.activeMs += Math.max(0, Date.now() - meter.activeStartedAt);
+	meter.activeStartedAt = null;
+}
+
+
+function getActiveMs(ctx: ExtensionContext): number {
+	const meter = getActiveMeter(ctx);
+	if (meter.activeStartedAt === null) return meter.activeMs;
+	return meter.activeMs + Math.max(0, Date.now() - meter.activeStartedAt);
+}
 
 function getUsageState(ctx: ExtensionContext): UsageState {
 	let state = usageStates.get(ctx);
@@ -275,7 +313,6 @@ function refreshSubscriptionUsage(ctx: ExtensionContext): void {
 			state.inFlight = false;
 		});
 }
-
 function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
 	if (usageRefreshTimers.has(ctx)) return;
 	usageRefreshTimers.add(ctx);
@@ -284,6 +321,16 @@ function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
 		if (state.usage) requestStatuslineRender(ctx);
 		refreshSubscriptionUsage(ctx);
 	}, 60_000);
+}
+
+function scheduleMeterTick(ctx: ExtensionContext): void {
+	if (meterTickTimers.has(ctx)) return;
+	meterTickTimers.add(ctx);
+	// Live tick for the elapsed-time segment: 1s cadence while the agent runs;
+	// the render itself is skipped when the meter is idle.
+	ctx.setInterval(() => {
+		if (getActiveMeter(ctx).activeStartedAt !== null) requestStatuslineRender(ctx);
+	}, 1_000);
 }
 
 
@@ -306,12 +353,26 @@ function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
 	return `${accentAnsi}${accentHex}${FG_RESET} ${theme.fg("text", title)}`;
 }
 
+function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
+	const messages = ctx.sessionManager
+		.getEntries()
+		.filter(entry => entry.type === "message")
+		.map(entry => entry.message);
+	const rate = calculateTokensPerSecond(messages, !ctx.isIdle());
+	if (!rate) return "";
+	return theme.fg("statusLineOutput", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
+}
 function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number): string {
 	const running = ctx.getAsyncJobSnapshot()?.running ?? [];
 	const tasks = running.filter(job => job.type === "task").length;
 	const jobs = running.filter(job => job.type === "bash").length;
 	const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
-	const right = theme.fg("success", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`);
+	const right = [
+		theme.fg("success", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`),
+		renderThroughput(ctx, theme),
+	]
+		.filter(Boolean)
+		.join("  ");
 	return renderBlackRow(sessionTitleLabel(ctx, theme), right, width);
 }
 
@@ -346,19 +407,16 @@ function renderContext(ctx: ExtensionContext, theme: StatusTheme): string {
 	);
 }
 
-function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
-	const messages = ctx.sessionManager
-		.getEntries()
-		.filter(entry => entry.type === "message")
-		.map(entry => entry.message);
-	const rate = calculateTokensPerSecond(messages, !ctx.isIdle());
-	if (!rate) return "";
-	return theme.fg("statusLineOutput", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
+function renderTimeSpent(ctx: ExtensionContext, theme: StatusTheme): string {
+	const activeMs = getActiveMs(ctx);
+	if (activeMs < 1000) return "";
+	return `${theme.icon.time} ${formatDuration(activeMs)}`;
 }
+
 
 function renderBottomRow(pi: ExtensionAPI, ctx: ExtensionContext, theme: StatusTheme, width: number): string {
 	const left = [renderModel(pi, theme, ctx), renderPath(ctx, theme)].filter(Boolean).join("  ");
-	const right = [renderContext(ctx, theme), renderSubscriptionUsage(ctx, theme), renderThroughput(ctx, theme)]
+	const right = [renderContext(ctx, theme), renderTimeSpent(ctx, theme), renderSubscriptionUsage(ctx, theme)]
 		.filter(Boolean)
 		.join("  ");
 	return renderBlackRow(left, right, width);
@@ -371,6 +429,7 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
 		activeContext = ctx;
 		scheduleSubscriptionUsageRefresh(ctx);
+		scheduleMeterTick(ctx);
 		refreshSubscriptionUsage(ctx);
 	};
 
@@ -379,9 +438,18 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("session_branch", refresh);
 	pi.on("session_tree", refresh);
 	pi.on("agent_start", refresh);
-	pi.on("agent_end", refresh);
 	pi.on("tool_execution_start", refresh);
 	pi.on("tool_execution_end", refresh);
+
+	pi.on("agent_start", (_event, ctx) => {
+		markActivityStart(ctx);
+		requestStatuslineRender(ctx);
+	});
+	pi.on("agent_end", (_event, ctx) => {
+		markActivityEnd(ctx);
+		requestStatuslineRender(ctx);
+	});
+
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (activeContext === ctx) activeContext = undefined;
