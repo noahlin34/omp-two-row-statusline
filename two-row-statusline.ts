@@ -2,15 +2,27 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { formatDuration } from "@oh-my-pi/pi-utils";
-import { truncateToWidth, visibleWidth, type ComposerStyle } from "@oh-my-pi/pi-tui";
+import {
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+	type ComposerStyle,
+} from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
+
+function isInteractiveTui(ctx: ExtensionContext): boolean {
+	return ctx.hasUI && ctx.mode === "tui";
+}
 
 const STATUS_REFRESH_KEY = "omp-two-row-statusline:refresh";
 const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
+const MAX_PATH_LABEL_WIDTH = 34;
+const PATH_ELLIPSIS = "…";
+const PATH_ELLIPSIS_WIDTH = visibleWidth(PATH_ELLIPSIS);
 
 function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => ExtensionContext | undefined): void {
 	let contentRowIndex = 0;
@@ -28,7 +40,7 @@ function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => Extensio
 		renderTop: ({ width }) => {
 			contentRowIndex = 0;
 			const ctx = getContext();
-			if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
+			if (!ctx || !isInteractiveTui(ctx)) return undefined;
 			return renderTopRow(ctx, ctx.ui.theme, width);
 		},
 		renderRow: ({ width, gutter, text, pad }) => {
@@ -39,7 +51,7 @@ function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => Extensio
 			// renderBottom callback runs after the cursor row, so emit this row
 			// alongside the first content row instead.
 			const ctx = getContext();
-			if (!ctx?.hasUI || ctx.mode !== "tui") return [row];
+			if (!ctx || !isInteractiveTui(ctx)) return [row];
 			return [renderBottomRow(pi, ctx, ctx.ui.theme, width), row];
 		},
 		renderBottom: () => undefined,
@@ -98,6 +110,48 @@ type ActiveMeter = {
 	activeMs: number;
 	activeStartedAt: number | null;
 };
+
+type ThroughputMessage = Parameters<typeof calculateTokensPerSecond>[0][number];
+
+type ThroughputState = {
+	messages: readonly ThroughputMessage[];
+};
+
+const EMPTY_THROUGHPUT_MESSAGES: readonly ThroughputMessage[] = [];
+const throughputStates = new WeakMap<object, ThroughputState>();
+
+function getThroughputState(ctx: ExtensionContext): ThroughputState {
+	let state = throughputStates.get(ctx.sessionManager);
+	if (!state) {
+		state = { messages: EMPTY_THROUGHPUT_MESSAGES };
+		throughputStates.set(ctx.sessionManager, state);
+	}
+	return state;
+}
+
+function isAssistantThroughputMessage(value: unknown): value is ThroughputMessage {
+	return typeof value === "object" && value !== null && "role" in value && value.role === "assistant";
+}
+
+function findLatestAssistantMessage(ctx: ExtensionContext): ThroughputMessage | undefined {
+	const entries = ctx.sessionManager.getEntries();
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (!entry || entry.type !== "message" || !isAssistantThroughputMessage(entry.message)) continue;
+		return entry.message;
+	}
+	return undefined;
+}
+
+function refreshThroughputFromEntries(ctx: ExtensionContext): void {
+	const message = findLatestAssistantMessage(ctx);
+	getThroughputState(ctx).messages = message ? [message] : EMPTY_THROUGHPUT_MESSAGES;
+}
+
+function updateThroughputFromMessage(ctx: ExtensionContext, message: unknown): void {
+	if (!isAssistantThroughputMessage(message)) return;
+	getThroughputState(ctx).messages = [message];
+}
 
 function getActiveMeter(ctx: ExtensionContext): ActiveMeter {
 	let meter = activeMeters.get(ctx.sessionManager);
@@ -267,12 +321,14 @@ function renderSubscriptionUsage(ctx: ExtensionContext, theme: StatusTheme): str
 }
 
 function requestStatuslineRender(ctx: ExtensionContext): void {
+	if (!isInteractiveTui(ctx)) return;
 	// Clearing a private hook key is row-free but still asks the TUI to repaint
 	// the editor, whose render owns both statusline rows.
 	ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
 }
 
 function refreshSubscriptionUsage(ctx: ExtensionContext): void {
+	if (!isInteractiveTui(ctx)) return;
 	const state = getUsageState(ctx);
 	const provider = ctx.model?.provider ?? "";
 	const sessionId = ctx.sessionManager.getSessionId();
@@ -314,6 +370,7 @@ function refreshSubscriptionUsage(ctx: ExtensionContext): void {
 		});
 }
 function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
+	if (!isInteractiveTui(ctx)) return;
 	if (usageRefreshTimers.has(ctx)) return;
 	usageRefreshTimers.add(ctx);
 	ctx.setInterval(() => {
@@ -354,11 +411,7 @@ function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
 }
 
 function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
-	const messages = ctx.sessionManager
-		.getEntries()
-		.filter(entry => entry.type === "message")
-		.map(entry => entry.message);
-	const rate = calculateTokensPerSecond(messages, !ctx.isIdle());
+	const rate = calculateTokensPerSecond(getThroughputState(ctx).messages, !ctx.isIdle());
 	if (!rate) return "";
 	return theme.fg("statusLineOutput", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
 }
@@ -394,7 +447,13 @@ function renderModel(pi: ExtensionAPI, theme: StatusTheme, ctx: ExtensionContext
 }
 function renderPath(ctx: ExtensionContext, theme: StatusTheme): string {
 	const cwd = cleanText(ctx.cwd || ctx.sessionManager.getCwd());
-	const label = cwd.length > 34 ? `…${cwd.slice(-33)}` : cwd;
+	const cwdWidth = visibleWidth(cwd);
+	let label = cwd;
+	if (cwdWidth > MAX_PATH_LABEL_WIDTH) {
+		const tailWidth = MAX_PATH_LABEL_WIDTH - PATH_ELLIPSIS_WIDTH;
+		const tail = sliceWithWidth(cwd, Math.max(0, cwdWidth - tailWidth), tailWidth).text;
+		label = `${PATH_ELLIPSIS}${tail}`;
+	}
 	return theme.fg("statusLinePath", `${theme.icon.folder} ${label}`);
 }
 
@@ -427,7 +486,9 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	registerStatuslineComposer(pi, () => activeContext);
 
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
+		if (!isInteractiveTui(ctx)) return;
 		activeContext = ctx;
+		refreshThroughputFromEntries(ctx);
 		scheduleSubscriptionUsageRefresh(ctx);
 		scheduleMeterTick(ctx);
 		refreshSubscriptionUsage(ctx);
@@ -437,23 +498,35 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("session_switch", refresh);
 	pi.on("session_branch", refresh);
 	pi.on("session_tree", refresh);
+	pi.on("session_compact", refresh);
 	pi.on("agent_start", refresh);
 	pi.on("tool_execution_start", refresh);
 	pi.on("tool_execution_end", refresh);
 
+	const refreshThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
+		if (!isInteractiveTui(ctx)) return;
+		activeContext = ctx;
+		updateThroughputFromMessage(ctx, event.message);
+	};
+
+	pi.on("message_start", refreshThroughput);
+	pi.on("message_update", refreshThroughput);
+	pi.on("message_end", refreshThroughput);
+
 	pi.on("agent_start", (_event, ctx) => {
+		if (!isInteractiveTui(ctx)) return;
 		markActivityStart(ctx);
 		requestStatuslineRender(ctx);
 	});
 	pi.on("agent_end", (_event, ctx) => {
+		if (!isInteractiveTui(ctx)) return;
 		markActivityEnd(ctx);
 		requestStatuslineRender(ctx);
 	});
 
-
 	pi.on("session_shutdown", (_event, ctx) => {
 		if (activeContext === ctx) activeContext = undefined;
-		if (ctx.hasUI) {
+		if (isInteractiveTui(ctx)) {
 			ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
 		}
 	});
