@@ -1,0 +1,16 @@
+{
+  "name": "omp-two-row-statusline",
+  "version": "1.0.0",
+  "description": "Two-row statusline Composer Shape for Oh My Pi.",
+  "type": "module",
+  "main": "./two-row-statusline.ts",
+  "files": [
+    "README.md",
+    "two-row-statusline.ts"
+  ],
+  "omp": {
+    "extensions": [
+      "./two-row-statusline.ts"
+    ]
+  }
+}
