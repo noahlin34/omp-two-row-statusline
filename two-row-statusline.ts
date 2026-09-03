@@ -93,6 +93,7 @@ type UsageReportLike = {
 };
 
 type UsageState = {
+	provider: string;
 	sessionKey: string;
 	fetchedAt: number;
 	inFlight: boolean;
@@ -114,7 +115,10 @@ type ActiveMeter = {
 type ThroughputMessage = Parameters<typeof calculateTokensPerSecond>[0][number];
 
 type ThroughputState = {
-	messages: readonly ThroughputMessage[];
+	currentMessages: readonly ThroughputMessage[];
+	fallbackMessages: readonly ThroughputMessage[];
+	lastRate: number | null;
+	lastRateTimestamp: number | null;
 };
 
 const EMPTY_THROUGHPUT_MESSAGES: readonly ThroughputMessage[] = [];
@@ -123,7 +127,12 @@ const throughputStates = new WeakMap<object, ThroughputState>();
 function getThroughputState(ctx: ExtensionContext): ThroughputState {
 	let state = throughputStates.get(ctx.sessionManager);
 	if (!state) {
-		state = { messages: EMPTY_THROUGHPUT_MESSAGES };
+		state = {
+			currentMessages: EMPTY_THROUGHPUT_MESSAGES,
+			fallbackMessages: EMPTY_THROUGHPUT_MESSAGES,
+			lastRate: null,
+			lastRateTimestamp: null,
+		};
 		throughputStates.set(ctx.sessionManager, state);
 	}
 	return state;
@@ -133,24 +142,41 @@ function isAssistantThroughputMessage(value: unknown): value is ThroughputMessag
 	return typeof value === "object" && value !== null && "role" in value && value.role === "assistant";
 }
 
-function findLatestAssistantMessage(ctx: ExtensionContext): ThroughputMessage | undefined {
+function findLatestAssistantMessages(
+	ctx: ExtensionContext,
+): readonly [ThroughputMessage | undefined, ThroughputMessage | undefined] {
 	const entries = ctx.sessionManager.getEntries();
+	let current: ThroughputMessage | undefined;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (!entry || entry.type !== "message" || !isAssistantThroughputMessage(entry.message)) continue;
-		return entry.message;
+		if (!current) {
+			current = entry.message;
+			continue;
+		}
+		return [current, entry.message];
 	}
-	return undefined;
+	return [current, undefined];
 }
 
 function refreshThroughputFromEntries(ctx: ExtensionContext): void {
-	const message = findLatestAssistantMessage(ctx);
-	getThroughputState(ctx).messages = message ? [message] : EMPTY_THROUGHPUT_MESSAGES;
+	const [current, fallback] = findLatestAssistantMessages(ctx);
+	const state = getThroughputState(ctx);
+	state.currentMessages = current ? [current] : EMPTY_THROUGHPUT_MESSAGES;
+	state.fallbackMessages = fallback ? [fallback] : EMPTY_THROUGHPUT_MESSAGES;
+}
+
+function beginThroughputMessage(ctx: ExtensionContext, message: unknown): void {
+	if (!isAssistantThroughputMessage(message)) return;
+	const state = getThroughputState(ctx);
+	const currentRate = calculateTokensPerSecond(state.currentMessages, !ctx.isIdle());
+	if (currentRate !== null) state.fallbackMessages = state.currentMessages;
+	state.currentMessages = [message];
 }
 
 function updateThroughputFromMessage(ctx: ExtensionContext, message: unknown): void {
 	if (!isAssistantThroughputMessage(message)) return;
-	getThroughputState(ctx).messages = [message];
+	getThroughputState(ctx).currentMessages = [message];
 }
 
 function getActiveMeter(ctx: ExtensionContext): ActiveMeter {
@@ -183,10 +209,10 @@ function getActiveMs(ctx: ExtensionContext): number {
 }
 
 function getUsageState(ctx: ExtensionContext): UsageState {
-	let state = usageStates.get(ctx);
+	let state = usageStates.get(ctx.sessionManager);
 	if (!state) {
-		state = { sessionKey: "", fetchedAt: 0, inFlight: false };
-		usageStates.set(ctx, state);
+		state = { provider: "", sessionKey: "", fetchedAt: 0, inFlight: false };
+		usageStates.set(ctx.sessionManager, state);
 	}
 	return state;
 }
@@ -204,22 +230,30 @@ function matchesUsageAccount(
 	const metadata = report.metadata ?? {};
 	const scope = limit.scope ?? {};
 	const activeOrg = normalizeIdentityValue(identity.orgId);
-	const reportOrg = normalizeIdentityValue(metadata.orgId);
+	const reportOrg = normalizeIdentityValue(metadata.orgId ?? scope.orgId);
 	if (activeOrg || reportOrg) {
 		if (activeOrg !== reportOrg) return false;
+		if (!identity.accountId && !identity.email && !identity.projectId) return true;
 	}
 
-	const matches = [
+	const activeAccount = normalizeIdentityValue(identity.accountId);
+	if (
+		activeAccount &&
+		[metadata.accountId, metadata.account_id, scope.accountId].some(
+			value => normalizeIdentityValue(value) === activeAccount,
+		)
+	) {
+		return true;
+	}
 
-		[identity.accountId, metadata.accountId ?? metadata.account_id ?? scope.accountId],
-		[identity.email, metadata.email],
-		[identity.projectId, metadata.projectId ?? scope.projectId],
-	].some(([active, reported]) => {
-		const normalizedActive = normalizeIdentityValue(active);
-		return normalizedActive !== undefined && normalizedActive === normalizeIdentityValue(reported);
-	});
+	const activeEmail = normalizeIdentityValue(identity.email);
+	if (activeEmail && normalizeIdentityValue(metadata.email) === activeEmail) return true;
 
-	return matches || Boolean(activeOrg && !identity.accountId && !identity.email && !identity.projectId);
+	const activeProject = normalizeIdentityValue(identity.projectId);
+	return Boolean(
+		activeProject &&
+			[metadata.projectId, scope.projectId].some(value => normalizeIdentityValue(value) === activeProject),
+	);
 }
 
 function resolveUsageUsedFraction(limit: UsageLimitLike): number | undefined {
@@ -284,7 +318,7 @@ function selectSubscriptionUsage(reports: unknown, ctx: ExtensionContext): Subsc
 			if (!matchesUsageAccount(report, limit, identity)) continue;
 			const fraction = resolveUsageUsedFraction(limit);
 			if (typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
-			const window = usageWindowLabel(limit.scope?.windowId, limit.window?.durationMs);
+			const window = usageWindowLabel(limit.scope?.windowId ?? limit.window?.id, limit.window?.durationMs);
 			const resetsAt = limit.window?.resetsAt;
 			candidates.push({
 				priority: usageWindowPriority(window),
@@ -327,7 +361,7 @@ function requestStatuslineRender(ctx: ExtensionContext): void {
 	ctx.ui.setStatus(STATUS_REFRESH_KEY, undefined);
 }
 
-function refreshSubscriptionUsage(ctx: ExtensionContext): void {
+function refreshSubscriptionUsage(ctx: ExtensionContext, force = false): void {
 	if (!isInteractiveTui(ctx)) return;
 	const state = getUsageState(ctx);
 	const provider = ctx.model?.provider ?? "";
@@ -341,32 +375,45 @@ function refreshSubscriptionUsage(ctx: ExtensionContext): void {
 		identity?.projectId ?? "",
 		identity?.orgId ?? "",
 	].join("\0");
+	if (state.provider !== provider) {
+		state.provider = provider;
+		state.usage = undefined;
+	}
 	if (state.sessionKey !== sessionKey) {
 		state.sessionKey = sessionKey;
 		state.fetchedAt = 0;
-		state.usage = undefined;
 	}
-	if (!provider || state.inFlight || Date.now() - state.fetchedAt < USAGE_CACHE_MS) return;
+	if (!provider || state.inFlight || (!force && Date.now() - state.fetchedAt < USAGE_CACHE_MS)) return;
 
 	const authStorage = ctx.modelRegistry.authStorage;
 	const fetcher = authStorage.fetchUsageReports;
 	if (typeof fetcher !== "function") return;
 	state.inFlight = true;
+	const requestedSessionKey = sessionKey;
 	void fetcher
 		.call(authStorage, {
 			baseUrlResolver: (providerName: string) => ctx.modelRegistry.getProviderBaseUrl(providerName),
 			signal: AbortSignal.timeout(2_000),
 		})
 		.then(reports => {
-			state.usage = selectSubscriptionUsage(reports, ctx);
-			state.fetchedAt = Date.now();
+			if (state.sessionKey !== requestedSessionKey) return;
+			const usage = selectSubscriptionUsage(reports, ctx);
+			if (usage) {
+				state.usage = usage;
+				state.fetchedAt = Date.now();
+			} else {
+				state.fetchedAt = 0;
+			}
 			requestStatuslineRender(ctx);
 		})
 		.catch(() => {
-			state.fetchedAt = Date.now();
+			// Retry transient provider failures on the minute cadence instead
+			// of caching an empty result for the full success interval.
+			state.fetchedAt = 0;
 		})
 		.finally(() => {
 			state.inFlight = false;
+			if (state.sessionKey !== requestedSessionKey) refreshSubscriptionUsage(ctx, true);
 		});
 }
 function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
@@ -394,10 +441,20 @@ function scheduleMeterTick(ctx: ExtensionContext): void {
 function renderBlackRow(left: string, right: string, width: number): string {
 	const edgePadding = Math.min(ROW_EDGE_PADDING, Math.floor(width / 2));
 	const innerWidth = Math.max(0, width - edgePadding * 2);
-	let content = right
-		? `${left}${" ".repeat(Math.max(1, innerWidth - visibleWidth(left) - visibleWidth(right)))}${right}`
-		: left;
-	content = truncateToWidth(content, innerWidth);
+	const fullRightWidth = visibleWidth(right);
+	const rightContent =
+		fullRightWidth <= innerWidth
+			? right
+			: `${PATH_ELLIPSIS}${sliceWithWidth(
+					right,
+					Math.max(0, fullRightWidth - innerWidth + PATH_ELLIPSIS_WIDTH),
+					Math.max(0, innerWidth - PATH_ELLIPSIS_WIDTH),
+				).text}`;
+	const rightWidth = visibleWidth(rightContent);
+	const separatorWidth = rightWidth > 0 && innerWidth > rightWidth ? 1 : 0;
+	const leftContent = truncateToWidth(left, Math.max(0, innerWidth - rightWidth - separatorWidth));
+	const gapWidth = rightWidth > 0 ? Math.max(separatorWidth, innerWidth - visibleWidth(leftContent) - rightWidth) : 0;
+	const content = `${leftContent}${" ".repeat(gapWidth)}${rightContent}`;
 	const trailingPadding = Math.max(0, innerWidth - visibleWidth(content));
 	return `${BLACK_BG}${" ".repeat(edgePadding)}${content}${" ".repeat(trailingPadding + edgePadding)}${RESET}`;
 }
@@ -411,7 +468,19 @@ function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
 }
 
 function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
-	const rate = calculateTokensPerSecond(getThroughputState(ctx).messages, !ctx.isIdle());
+	const state = getThroughputState(ctx);
+	const streaming = !ctx.isIdle();
+	const current = state.currentMessages[0];
+	const timestamp = typeof current?.timestamp === "number" ? current.timestamp : null;
+	let rate = calculateTokensPerSecond(state.currentMessages, streaming);
+	if (rate !== null) {
+		state.lastRate = rate;
+		state.lastRateTimestamp = timestamp;
+	} else if (timestamp !== null && state.lastRateTimestamp === timestamp) {
+		rate = state.lastRate;
+	} else {
+		rate = calculateTokensPerSecond(state.fallbackMessages, streaming);
+	}
 	if (!rate) return "";
 	return theme.fg("statusLineOutput", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
 }
@@ -503,15 +572,23 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("tool_execution_start", refresh);
 	pi.on("tool_execution_end", refresh);
 
-	const refreshThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
+	const startThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
+		if (!isInteractiveTui(ctx)) return;
+		activeContext = ctx;
+		beginThroughputMessage(ctx, event.message);
+		requestStatuslineRender(ctx);
+	};
+
+	const updateThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
 		if (!isInteractiveTui(ctx)) return;
 		activeContext = ctx;
 		updateThroughputFromMessage(ctx, event.message);
+		requestStatuslineRender(ctx);
 	};
 
-	pi.on("message_start", refreshThroughput);
-	pi.on("message_update", refreshThroughput);
-	pi.on("message_end", refreshThroughput);
+	pi.on("message_start", startThroughput);
+	pi.on("message_update", updateThroughput);
+	pi.on("message_end", updateThroughput);
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (!isInteractiveTui(ctx)) return;
@@ -521,6 +598,7 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("agent_end", (_event, ctx) => {
 		if (!isInteractiveTui(ctx)) return;
 		markActivityEnd(ctx);
+		refreshSubscriptionUsage(ctx, true);
 		requestStatuslineRender(ctx);
 	});
 
