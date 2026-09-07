@@ -165,3 +165,6 @@ There is no project build step. For a meaningful UI change, verify the real OMP 
 6. Confirm non-TUI loading does not fail if that execution mode is relevant to the change.
 
 Use focused checks for changed behavior. Do not claim a UI change is verified from a TypeScript parse or diff alone.
+
+#Notes
+IT should also be kept in mind that the upstream OMP is a quickly evolving project that often changes the APIs it exposes. If you are unsure about something, it can be a good idea to check the OMP changelog
