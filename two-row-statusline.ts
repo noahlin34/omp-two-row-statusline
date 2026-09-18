@@ -1,8 +1,16 @@
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { calculateTokensPerSecond } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
-import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	MessageEndEvent,
+	MessageStartEvent,
+	MessageUpdateEvent,
+} from "@oh-my-pi/pi-coding-agent";
+import { TokenRateMeter } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import {
+	getSessionAccentAnsi,
+	getSessionAccentHex,
 	sliceWithWidth,
 	truncateToWidth,
 	visibleWidth,
@@ -10,6 +18,9 @@ import {
 } from "@oh-my-pi/pi-tui";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
+
+/** The three message lifecycle events that drive the throughput meter. */
+type MessageMeterEvent = MessageStartEvent | MessageUpdateEvent | MessageEndEvent;
 
 function isInteractiveTui(ctx: ExtensionContext): boolean {
 	return ctx.hasUI && ctx.mode === "tui";
@@ -112,71 +123,87 @@ type ActiveMeter = {
 	activeStartedAt: number | null;
 };
 
-type ThroughputMessage = Parameters<typeof calculateTokensPerSecond>[0][number];
-
-type ThroughputState = {
-	currentMessages: readonly ThroughputMessage[];
-	fallbackMessages: readonly ThroughputMessage[];
-	lastRate: number | null;
-	lastRateTimestamp: number | null;
+/**
+ * Live generation throughput, using OMP's own {@link TokenRateMeter} — the
+ * same meter the built-in status line feeds from streamed deltas. It reports
+ * a kernel-weighted rate while a turn streams and keeps the last reading
+ * between turns, which the previous whole-message average could not: mid-
+ * stream assistant messages carry no `usage.output`/`duration` yet, so that
+ * readout stayed blank until each message ended.
+ *
+ * The meter must be fed from the same events core uses, so the extension
+ * mirrors core's `message_start` / `message_update` / `message_end` wiring and
+ * seeds it from history after a session swap.
+ */
+type SessionMeter = {
+	meter: TokenRateMeter;
+	/**
+	 * `model.tokenizer` the meter was built for. A {@link Tokenizer}'s encoding
+	 * is derived from exactly this field, so it is a complete and stable
+	 * rebuild key — comparing instance identity would rebuild the meter on
+	 * every render, discarding the smoothing it exists to provide.
+	 */
+	encoding: string | null;
 };
 
-const EMPTY_THROUGHPUT_MESSAGES: readonly ThroughputMessage[] = [];
-const throughputStates = new WeakMap<object, ThroughputState>();
+const sessionMeters = new WeakMap<object, SessionMeter>();
 
-function getThroughputState(ctx: ExtensionContext): ThroughputState {
-	let state = throughputStates.get(ctx.sessionManager);
-	if (!state) {
-		state = {
-			currentMessages: EMPTY_THROUGHPUT_MESSAGES,
-			fallbackMessages: EMPTY_THROUGHPUT_MESSAGES,
-			lastRate: null,
-			lastRateTimestamp: null,
-		};
-		throughputStates.set(ctx.sessionManager, state);
-	}
-	return state;
+function getSessionMeter(ctx: ExtensionContext): TokenRateMeter {
+	const model = ctx.model;
+	const encoding = model?.tokenizer ?? null;
+	const existing = sessionMeters.get(ctx.sessionManager);
+	// The meter's encoding is fixed at construction, so a model switch must
+	// rebuild it rather than keep counting with the previous model's tokenizer.
+	if (existing && existing.encoding === encoding) return existing.meter;
+
+	const tokenizer = new Tokenizer(model);
+	const meter = new TokenRateMeter(text => tokenizer.countTokens(text));
+	sessionMeters.set(ctx.sessionManager, { meter, encoding });
+	seedMeterFromHistory(ctx, meter);
+	return meter;
 }
 
-function isAssistantThroughputMessage(value: unknown): value is ThroughputMessage {
-	return typeof value === "object" && value !== null && "role" in value && value.role === "assistant";
-}
-
-function findLatestAssistantMessages(
-	ctx: ExtensionContext,
-): readonly [ThroughputMessage | undefined, ThroughputMessage | undefined] {
+/** Re-seed the meter from the last completed assistant turn after a session swap. */
+function seedMeterFromHistory(ctx: ExtensionContext, meter: TokenRateMeter): void {
 	const entries = ctx.sessionManager.getEntries();
-	let current: ThroughputMessage | undefined;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		if (!entry || entry.type !== "message" || !isAssistantThroughputMessage(entry.message)) continue;
-		if (!current) {
-			current = entry.message;
-			continue;
-		}
-		return [current, entry.message];
+		if (entry?.type !== "message") continue;
+		const message = entry.message;
+		if (typeof message !== "object" || message === null || message.role !== "assistant") continue;
+		const duration = "duration" in message ? message.duration : undefined;
+		const output = "usage" in message ? message.usage?.output : undefined;
+		if (typeof duration !== "number" || typeof output !== "number") continue;
+		meter.seed(output, duration);
+		return;
 	}
-	return [current, undefined];
+	meter.reset();
 }
 
-function refreshThroughputFromEntries(ctx: ExtensionContext): void {
-	const [current, fallback] = findLatestAssistantMessages(ctx);
-	const state = getThroughputState(ctx);
-	state.currentMessages = current ? [current] : EMPTY_THROUGHPUT_MESSAGES;
-	state.fallbackMessages = fallback ? [fallback] : EMPTY_THROUGHPUT_MESSAGES;
-}
-
-function beginThroughputMessage(ctx: ExtensionContext, message: unknown): void {
-	if (!isAssistantThroughputMessage(message)) return;
-	const state = getThroughputState(ctx);
-	const currentRate = calculateTokensPerSecond(state.currentMessages, !ctx.isIdle());
-	if (currentRate !== null) state.fallbackMessages = state.currentMessages;
-	state.currentMessages = [message];
-}
-
-function updateThroughputFromMessage(ctx: ExtensionContext, message: unknown): void {
-	if (!isAssistantThroughputMessage(message)) return;
-	getThroughputState(ctx).currentMessages = [message];
+/** Mirrors core's per-event meter feeding; see the block comment on `SessionMeter`. */
+function feedSessionMeter(ctx: ExtensionContext, event: MessageMeterEvent): void {
+	if (event.message.role !== "assistant") return;
+	const meter = getSessionMeter(ctx);
+	const message = event.message;
+	switch (event.type) {
+		case "message_start":
+			meter.begin(typeof message.timestamp === "number" ? message.timestamp : undefined);
+			return;
+		case "message_end":
+			meter.end(
+				message.usage?.output,
+				"duration" in message && typeof message.duration === "number"
+					? (typeof message.timestamp === "number" ? message.timestamp : Date.now()) + message.duration
+					: undefined,
+			);
+			return;
+		case "message_update": {
+			const delta = event.assistantMessageEvent;
+			if (delta?.type === "text_delta" || delta?.type === "thinking_delta" || delta?.type === "toolcall_delta") {
+				meter.push(delta.delta);
+			}
+		}
+	}
 }
 
 function getActiveMeter(ctx: ExtensionContext): ActiveMeter {
@@ -468,20 +495,10 @@ function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
 }
 
 function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
-	const state = getThroughputState(ctx);
-	const streaming = !ctx.isIdle();
-	const current = state.currentMessages[0];
-	const timestamp = typeof current?.timestamp === "number" ? current.timestamp : null;
-	let rate = calculateTokensPerSecond(state.currentMessages, streaming);
-	if (rate !== null) {
-		state.lastRate = rate;
-		state.lastRateTimestamp = timestamp;
-	} else if (timestamp !== null && state.lastRateTimestamp === timestamp) {
-		rate = state.lastRate;
-	} else {
-		rate = calculateTokensPerSecond(state.fallbackMessages, streaming);
-	}
-	if (!rate) return "";
+	// `rate()` already holds the last reading between turns and returns null
+	// until a run has accumulated enough tokens to measure.
+	const rate = getSessionMeter(ctx).rate();
+	if (rate === null) return "";
 	return theme.fg("statusLineOutput", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
 }
 function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number): string {
@@ -557,7 +574,9 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	const refresh = (_event: unknown, ctx: ExtensionContext): void => {
 		if (!isInteractiveTui(ctx)) return;
 		activeContext = ctx;
-		refreshThroughputFromEntries(ctx);
+		// Rebuild (and re-seed) the meter when the session or model changed
+		// underneath this context.
+		getSessionMeter(ctx);
 		scheduleSubscriptionUsageRefresh(ctx);
 		scheduleMeterTick(ctx);
 		refreshSubscriptionUsage(ctx);
@@ -572,23 +591,16 @@ export default function twoRowStatusline(pi: ExtensionAPI): void {
 	pi.on("tool_execution_start", refresh);
 	pi.on("tool_execution_end", refresh);
 
-	const startThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
+	const meterEvent = (event: MessageMeterEvent, ctx: ExtensionContext): void => {
 		if (!isInteractiveTui(ctx)) return;
 		activeContext = ctx;
-		beginThroughputMessage(ctx, event.message);
+		feedSessionMeter(ctx, event);
 		requestStatuslineRender(ctx);
 	};
 
-	const updateThroughput = (event: { message: unknown }, ctx: ExtensionContext): void => {
-		if (!isInteractiveTui(ctx)) return;
-		activeContext = ctx;
-		updateThroughputFromMessage(ctx, event.message);
-		requestStatuslineRender(ctx);
-	};
-
-	pi.on("message_start", startThroughput);
-	pi.on("message_update", updateThroughput);
-	pi.on("message_end", updateThroughput);
+	pi.on("message_start", meterEvent);
+	pi.on("message_update", meterEvent);
+	pi.on("message_end", meterEvent);
 
 	pi.on("agent_start", (_event, ctx) => {
 		if (!isInteractiveTui(ctx)) return;
