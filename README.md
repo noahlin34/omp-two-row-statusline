@@ -11,7 +11,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 ### Top row
 
 - The current session title, with the session accent color.
-- Right-aligned: green counts of running task and bash jobs, and the current output throughput in tokens per second.
+- Right-aligned: green counts of running task and bash jobs, and the live output throughput in tokens per second, rendered with OMP's own generation meter (`TokenRateMeter`). The rate is smoothed over recent stream time, so it updates while the model streams and holds its last reading between turns. It stays blank until a run has produced enough tokens to measure (OMP's meter requires at least ~200 tokens over ~4s of stream time), which also keeps bursty write-heavy turns from producing a bogus reading.
 
 ### Bottom row
 
@@ -97,9 +97,19 @@ The source imports OMP's bundled extension and TUI APIs:
 
 ```ts
 @oh-my-pi/pi-coding-agent
-@oh-my-pi/pi-tui
+@oh-my-pi/pi-coding-agent/utils/token-rate   # TokenRateMeter
+@oh-my-pi/pi-agent-core                      # Tokenizer
+@oh-my-pi/pi-tui                             # composer style, theme, session accent
 @oh-my-pi/pi-utils
 ```
+
+The throughput readout uses OMP's own generation meter: the extension feeds a
+`TokenRateMeter` from the same `message_start` / `message_update` / `message_end`
+events core uses, tokenizing deltas with the active model's own `Tokenizer`, and
+seeds it from history after a session or model switch. OMP 18.2 moved the
+terminal UI modules (themes, status line, composer, chat) into `@oh-my-pi/pi-tui`;
+the session accent helpers now come from that package's root export rather than
+`@oh-my-pi/pi-coding-agent/utils/session-color`, which no longer exists.
 
 It is intended to run inside OMP, not as a standalone Node.js script.
 

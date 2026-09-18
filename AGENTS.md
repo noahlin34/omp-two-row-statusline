@@ -39,6 +39,7 @@ The internal OMP documentation and the currently installed OMP package types are
 The extension intentionally uses OMP's native Composer Shape API:
 
 - `two-row-statusline.ts` imports `ComposerStyle` from `@oh-my-pi/pi-tui`.
+- Since OMP 18.2, the terminal UI modules live in `@oh-my-pi/pi-tui`. Import theme, composer, and session-accent symbols (`getSessionAccentHex`, `getSessionAccentAnsi`) from that package; the matching `@oh-my-pi/pi-coding-agent` subpaths, including `utils/session-color`, no longer exist and an import of one fails the whole extension load.
 - `registerStatuslineComposer(...)` calls `pi.registerComposerShape(...)` during extension initialization.
 - The registered shape is named `OMP Two-Row Statusline` and has the stable style id `omp-two-row-statusline`.
 - The style uses `sideBorders: false`, `verticalChrome: 2`, `statusAttachment: "none"`, `bottomBar: "none"`, and `bottomBarGap: false`.
@@ -82,17 +83,40 @@ Subscription usage is optional and asynchronous. Rendering must remain synchrono
 The top row currently contains:
 
 - the session name with its session accent color;
-- running task and bash-job counts, right-aligned and styled with the success color.
+- right-aligned, running task and bash-job counts styled with the success color,
+  and the live generation throughput rendered with OMP's own `TokenRateMeter`.
 
 The second row currently contains:
 
 - model and thinking level;
 - shortened current working directory;
 - context usage percentage and formatted token count;
-- optional provider subscription usage and reset countdown;
-- output throughput in tokens per second.
+- elapsed agent-processing time;
+- optional provider subscription usage and reset countdown.
 
 Use the active OMP theme instead of hard-coded theme assumptions. Preserve the existing width-aware truncation and ANSI-safe visible-width handling when changing labels or adding fields.
+
+### Throughput meter
+
+The tokens-per-second readout is OMP's `TokenRateMeter` from
+`@oh-my-pi/pi-coding-agent/utils/token-rate`, fed from the same
+`message_start` / `message_update` / `message_end` events core uses and
+tokenized with the active model's `Tokenizer` from `@oh-my-pi/pi-agent-core`.
+
+Do not reintroduce a whole-message average: a mid-stream assistant message
+carries no `usage.output` or `duration`, so such a readout stays blank for the
+entire stream and only settles once the turn ends. The `TokenRateMeter` reports
+a smoothed rate while streaming and holds the last reading between turns. It is
+evidence-gated (roughly 200 tokens over 4s of stream time) and therefore stays
+blank on short turns — that is expected, not a bug.
+
+The meter's encoding is fixed at construction, so it is rebuilt when
+`model.tokenizer` changes, and re-seeded from the last completed assistant turn
+after a session swap (`meter.seed`). One meter per `AgentSession`-keyed
+`WeakMap`. `getSessionMeter` is memoized on the model's tokenizer id, so
+calling it from the render path (as `renderThroughput` does) allocates nothing
+and must stay that way — never build a `Tokenizer` or `TokenRateMeter` per
+render, or the smoothing the meter exists to provide is discarded every frame.
 
 ## Editing guidance
 
