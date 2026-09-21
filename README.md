@@ -11,7 +11,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 ### Top row
 
 - The current session title, with the session accent color.
-- Right-aligned: green counts of running task and bash jobs, and the live output throughput in tokens per second, rendered with OMP's own generation meter (`TokenRateMeter`). The rate is smoothed over recent stream time, so it updates while the model streams and holds its last reading between turns. It stays blank until a run has produced enough tokens to measure (OMP's meter requires at least ~200 tokens over ~4s of stream time), which also keeps bursty write-heavy turns from producing a bogus reading.
+- Right-aligned: green counts of running task jobs and background jobs, and the live output throughput in tokens per second, rendered with OMP's own generation meter (`TokenRateMeter`). Both counts use the same predicates as OMP's built-in background-work readouts: a task job owned by a running subagent is counted as a task (matching OMP's running-subagent count) rather than double-counted as a job, and every other running job counts as a job. The rate is smoothed over recent stream time, so it updates while the model streams and holds its last reading between turns. It stays blank until a run has produced enough tokens to measure (OMP's meter requires at least ~200 tokens over ~4s of stream time), which also keeps bursty write-heavy turns from producing a bogus reading.
 
 ### Bottom row
 
@@ -21,7 +21,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 - Elapsed agent-processing time (the same active-time counter as OMP's built-in `time_spent` segment: idle time between turns never accumulates).
 - Subscription usage and reset countdown when the provider exposes usage data.
 
-The extension registers OMP's native Composer Shape API: both status rows render above the input, keeping the prompt and caret below the unified statusline. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
+The status rows use the active theme's `statusLineBg` background, so they follow both dark and light themes instead of painting a fixed black band. The context percentage is colored with OMP's own context-usage levels, which are window-scaled: it turns `warning`, `thinkingHigh`, then `error` at the same points core's `context_pct` status segment does. The extension registers OMP's native Composer Shape API: both status rows render above the input, keeping the prompt and caret below the unified statusline. The input itself uses the borderless composer layout; no custom editor or border-removal shim is used.
 
 ## Install
 
@@ -99,9 +99,9 @@ The source imports OMP's bundled extension and TUI APIs:
 @oh-my-pi/pi-coding-agent
 @oh-my-pi/pi-coding-agent/utils/token-rate   # TokenRateMeter
 @oh-my-pi/pi-agent-core                      # Tokenizer
-@oh-my-pi/pi-tui                             # composer style, theme, session accent
+@oh-my-pi/pi-tui                             # composer style, theme, session accent, width helpers
+@oh-my-pi/pi-tui/chrome                      # context-usage level + color
 @oh-my-pi/pi-utils
-```
 
 The throughput readout uses OMP's own generation meter: the extension feeds a
 `TokenRateMeter` from the same `message_start` / `message_update` / `message_end`

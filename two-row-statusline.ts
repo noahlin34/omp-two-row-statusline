@@ -1,9 +1,10 @@
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	MessageEndEvent,
-	MessageStartEvent,
-	MessageUpdateEvent,
+import {
+	AgentRegistry,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type MessageEndEvent,
+	type MessageStartEvent,
+	type MessageUpdateEvent,
 } from "@oh-my-pi/pi-coding-agent";
 import { TokenRateMeter } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
@@ -16,6 +17,10 @@ import {
 	visibleWidth,
 	type ComposerStyle,
 } from "@oh-my-pi/pi-tui";
+import {
+	getContextUsageLevel,
+	getContextUsageThemeColor,
+} from "@oh-my-pi/pi-tui/chrome";
 
 type StatusTheme = ExtensionContext["ui"]["theme"];
 
@@ -27,7 +32,6 @@ function isInteractiveTui(ctx: ExtensionContext): boolean {
 }
 
 const STATUS_REFRESH_KEY = "omp-two-row-statusline:refresh";
-const BLACK_BG = "\x1b[48;2;0;0;0m";
 const FG_RESET = "\x1b[39m";
 const RESET = "\x1b[0m";
 const ROW_EDGE_PADDING = 1;
@@ -112,10 +116,12 @@ type UsageState = {
 };
 
 const usageStates = new WeakMap<object, UsageState>();
+/** Keyed on `ctx.sessionManager`: stable across OMP's per-dispatch contexts. */
 const usageRefreshTimers = new WeakSet<object>();
 const USAGE_CACHE_MS = 5 * 60_000;
 
 const activeMeters = new WeakMap<object, ActiveMeter>();
+/** Keyed on `ctx.sessionManager`: stable across OMP's per-dispatch contexts. */
 const meterTickTimers = new WeakSet<object>();
 
 type ActiveMeter = {
@@ -445,8 +451,11 @@ function refreshSubscriptionUsage(ctx: ExtensionContext, force = false): void {
 }
 function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
 	if (!isInteractiveTui(ctx)) return;
-	if (usageRefreshTimers.has(ctx)) return;
-	usageRefreshTimers.add(ctx);
+	// Guard on the session manager, not on `ctx`: OMP builds a fresh context
+	// per event dispatch, so a `ctx`-keyed guard never matches twice and each
+	// refresh event would otherwise stack another pair of intervals.
+	if (usageRefreshTimers.has(ctx.sessionManager)) return;
+	usageRefreshTimers.add(ctx.sessionManager);
 	ctx.setInterval(() => {
 		const state = getUsageState(ctx);
 		if (state.usage) requestStatuslineRender(ctx);
@@ -455,8 +464,8 @@ function scheduleSubscriptionUsageRefresh(ctx: ExtensionContext): void {
 }
 
 function scheduleMeterTick(ctx: ExtensionContext): void {
-	if (meterTickTimers.has(ctx)) return;
-	meterTickTimers.add(ctx);
+	if (meterTickTimers.has(ctx.sessionManager)) return;
+	meterTickTimers.add(ctx.sessionManager);
 	// Live tick for the elapsed-time segment: 1s cadence while the agent runs;
 	// the render itself is skipped when the meter is idle.
 	ctx.setInterval(() => {
@@ -465,7 +474,7 @@ function scheduleMeterTick(ctx: ExtensionContext): void {
 }
 
 
-function renderBlackRow(left: string, right: string, width: number): string {
+function renderStatusRow(left: string, right: string, width: number, background: string): string {
 	const edgePadding = Math.min(ROW_EDGE_PADDING, Math.floor(width / 2));
 	const innerWidth = Math.max(0, width - edgePadding * 2);
 	const fullRightWidth = visibleWidth(right);
@@ -483,7 +492,7 @@ function renderBlackRow(left: string, right: string, width: number): string {
 	const gapWidth = rightWidth > 0 ? Math.max(separatorWidth, innerWidth - visibleWidth(leftContent) - rightWidth) : 0;
 	const content = `${leftContent}${" ".repeat(gapWidth)}${rightContent}`;
 	const trailingPadding = Math.max(0, innerWidth - visibleWidth(content));
-	return `${BLACK_BG}${" ".repeat(edgePadding)}${content}${" ".repeat(trailingPadding + edgePadding)}${RESET}`;
+	return `${background}${" ".repeat(edgePadding)}${content}${" ".repeat(trailingPadding + edgePadding)}${RESET}`;
 }
 
 function sessionTitleLabel(ctx: ExtensionContext, theme: StatusTheme): string {
@@ -503,8 +512,17 @@ function renderThroughput(ctx: ExtensionContext, theme: StatusTheme): string {
 }
 function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number): string {
 	const running = ctx.getAsyncJobSnapshot()?.running ?? [];
-	const tasks = running.filter(job => job.type === "task").length;
-	const jobs = running.filter(job => job.type === "bash").length;
+	// Counts match core's own background-work readouts: the subagent count is
+	// the registry's running `sub` agents, and the job count excludes task jobs
+	// owned by those subagents, which that count already covers.
+	const runningSubagentIds = new Set(
+		AgentRegistry.global()
+			.list()
+			.filter(entry => entry.kind === "sub" && entry.status === "running")
+			.map(entry => entry.id),
+	);
+	const tasks = runningSubagentIds.size;
+	const jobs = running.filter(job => !(job.type === "task" && job.agentId !== undefined && runningSubagentIds.has(job.agentId))).length;
 	const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
 	const right = [
 		theme.fg("success", `${icon}${tasks} tasks ${theme.sep.dot} ${jobs} jobs`),
@@ -512,7 +530,7 @@ function renderTopRow(ctx: ExtensionContext, theme: StatusTheme, width: number):
 	]
 		.filter(Boolean)
 		.join("  ");
-	return renderBlackRow(sessionTitleLabel(ctx, theme), right, width);
+	return renderStatusRow(sessionTitleLabel(ctx, theme), right, width, theme.getBgAnsi("statusLineBg"));
 }
 
 function renderModel(pi: ExtensionAPI, theme: StatusTheme, ctx: ExtensionContext): string {
@@ -546,8 +564,14 @@ function renderPath(ctx: ExtensionContext, theme: StatusTheme): string {
 function renderContext(ctx: ExtensionContext, theme: StatusTheme): string {
 	const usage = ctx.getContextUsage();
 	if (!usage || !Number.isFinite(usage.percent)) return "";
+	// Window-scaled thresholds, from OMP's own context-usage helpers, so the
+	// percentage turns warning/purple/error at the same points core's
+	// `context_pct` segment does.
+	const level = getContextUsageLevel(usage.percent, usage.contextWindow);
+	// getContextUsageThemeColor returns statusLineContext | warning |
+	// thinkingHigh | error.
 	return theme.fg(
-		"statusLineContext",
+		getContextUsageThemeColor(level),
 		`${theme.icon.context} ${usage.percent.toFixed(1)}%/${formatTokens(usage.contextWindow)}`,
 	);
 }
@@ -564,7 +588,7 @@ function renderBottomRow(pi: ExtensionAPI, ctx: ExtensionContext, theme: StatusT
 	const right = [renderContext(ctx, theme), renderTimeSpent(ctx, theme), renderSubscriptionUsage(ctx, theme)]
 		.filter(Boolean)
 		.join("  ");
-	return renderBlackRow(left, right, width);
+	return renderStatusRow(left, right, width, theme.getBgAnsi("statusLineBg"));
 }
 
 export default function twoRowStatusline(pi: ExtensionAPI): void {
