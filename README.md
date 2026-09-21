@@ -16,7 +16,7 @@ The statusline uses the active OMP theme and adapts to the terminal width.
 ### Bottom row
 
 - The active model and thinking level.
-- The current working directory, shortened when it is too long.
+- The current working directory, with a leading home directory abbreviated to `~` (the same abbreviation OMP's own `path` status segment applies), and otherwise shortened from the front when it is still too long.
 - Context usage as a percentage and formatted token count.
 - Elapsed agent-processing time (the same active-time counter as OMP's built-in `time_spent` segment: idle time between turns never accumulates).
 - Subscription usage and reset countdown when the provider exposes usage data.

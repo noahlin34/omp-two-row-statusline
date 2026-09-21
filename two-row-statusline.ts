@@ -9,6 +9,7 @@ import {
 import { TokenRateMeter } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import { formatDuration } from "@oh-my-pi/pi-utils";
+import { homedir } from "node:os";
 import {
 	getSessionAccentAnsi,
 	getSessionAccentHex,
@@ -38,6 +39,8 @@ const ROW_EDGE_PADDING = 1;
 const MAX_PATH_LABEL_WIDTH = 34;
 const PATH_ELLIPSIS = "…";
 const PATH_ELLIPSIS_WIDTH = visibleWidth(PATH_ELLIPSIS);
+/** Home directory for `~` abbreviation; empty disables it. */
+const HOME_DIR = homedir();
 
 function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => ExtensionContext | undefined): void {
 	let contentRowIndex = 0;
@@ -80,6 +83,17 @@ function registerStatuslineComposer(pi: ExtensionAPI, getContext: () => Extensio
 
 function cleanText(value: string): string {
 	return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+}
+/**
+ * Replace a leading home directory with `~`, the way OMP's own `path` status
+ * segment does (`statusLinePathAbbreviate`). Only a whole-component prefix is
+ * abbreviated, so `/home/noah2` is left alone.
+ */
+function abbreviateHome(path: string): string {
+	if (!HOME_DIR || !path.startsWith(HOME_DIR)) return path;
+	const rest = path.slice(HOME_DIR.length);
+	if (rest !== "" && !rest.startsWith("/")) return path;
+	return `~${rest}`;
 }
 
 function formatTokens(value: number): string {
@@ -550,7 +564,7 @@ function renderModel(pi: ExtensionAPI, theme: StatusTheme, ctx: ExtensionContext
 
 }
 function renderPath(ctx: ExtensionContext, theme: StatusTheme): string {
-	const cwd = cleanText(ctx.cwd || ctx.sessionManager.getCwd());
+	const cwd = abbreviateHome(cleanText(ctx.cwd || ctx.sessionManager.getCwd()));
 	const cwdWidth = visibleWidth(cwd);
 	let label = cwd;
 	if (cwdWidth > MAX_PATH_LABEL_WIDTH) {
