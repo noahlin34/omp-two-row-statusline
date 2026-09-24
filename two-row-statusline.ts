@@ -349,7 +349,7 @@ function usageWindowPriority(window: string): number {
 function selectSubscriptionUsage(reports: unknown, ctx: ExtensionContext): SubscriptionUsage | undefined {
 	const provider = ctx.model?.provider;
 	if (!provider || !Array.isArray(reports)) return undefined;
-	const identity = ctx.modelRegistry.authStorage.getOAuthAccountIdentity(
+	const identity = ctx.modelRegistry.authStorage.oauth.identity(
 		provider,
 		ctx.sessionManager.getSessionId(),
 	) as Record<string, unknown> | undefined;
@@ -413,7 +413,7 @@ function refreshSubscriptionUsage(ctx: ExtensionContext, force = false): void {
 	const state = getUsageState(ctx);
 	const provider = ctx.model?.provider ?? "";
 	const sessionId = ctx.sessionManager.getSessionId();
-	const identity = provider ? ctx.modelRegistry.authStorage.getOAuthAccountIdentity(provider, sessionId) : undefined;
+	const identity = provider ? ctx.modelRegistry.authStorage.oauth.identity(provider, sessionId) : undefined;
 	const sessionKey = [
 		provider,
 		sessionId,
@@ -432,13 +432,13 @@ function refreshSubscriptionUsage(ctx: ExtensionContext, force = false): void {
 	}
 	if (!provider || state.inFlight || (!force && Date.now() - state.fetchedAt < USAGE_CACHE_MS)) return;
 
-	const authStorage = ctx.modelRegistry.authStorage;
-	const fetcher = authStorage.fetchUsageReports;
+	const { usage: usageApi } = ctx.modelRegistry.authStorage;
+	const fetcher = usageApi.reports;
 	if (typeof fetcher !== "function") return;
 	state.inFlight = true;
 	const requestedSessionKey = sessionKey;
 	void fetcher
-		.call(authStorage, {
+		.call(usageApi, {
 			baseUrlResolver: (providerName: string) => ctx.modelRegistry.getProviderBaseUrl(providerName),
 			signal: AbortSignal.timeout(2_000),
 		})

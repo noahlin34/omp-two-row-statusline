@@ -79,8 +79,8 @@ The extension registers the composer shape during extension initialization, then
 
 Subscription usage is optional:
 
-- Usage reports are fetched only when the active provider exposes `fetchUsageReports`.
-- Reports are matched to the active OAuth account when account identity is available.
+- Usage reports are fetched only when the active provider exposes usage reports (`authStorage.usage.reports`).
+- Reports are matched to the active OAuth account via `authStorage.oauth.identity` when account identity is available.
 - The most relevant available window is preferred in this order: `5h`, `1d`, `7d`, `30d`, then any other window.
 - Results are cached for five minutes and refreshed in the background approximately once per minute.
 - A report request has a two-second timeout; unavailable usage data is omitted from the statusline.
@@ -109,7 +109,10 @@ events core uses, tokenizing deltas with the active model's own `Tokenizer`, and
 seeds it from history after a session or model switch. OMP 18.2 moved the
 terminal UI modules (themes, status line, composer, chat) into `@oh-my-pi/pi-tui`;
 the session accent helpers now come from that package's root export rather than
-`@oh-my-pi/pi-coding-agent/utils/session-color`, which no longer exists.
+`@oh-my-pi/pi-coding-agent/utils/session-color`, which no longer exists. OMP 18.3
+split the flat `AuthStorage` API into namespaces: usage reports moved from
+`authStorage.fetchUsageReports()` to `authStorage.usage.reports()`, and
+`authStorage.getOAuthAccountIdentity()` became `authStorage.oauth.identity()`.
 
 It is intended to run inside OMP, not as a standalone Node.js script.
 
